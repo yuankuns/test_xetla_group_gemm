@@ -243,9 +243,9 @@ struct MoEGEMMINT4 {
   static constexpr int num_sub_group_per_wg =
       (wg_tile_m / sg_tile_m) * (wg_tile_n / sg_tile_n);
 
-  using group_swizzle_t =
-      gpu::xetla::kernel::group_swizzle_default<static_cast<gpu_arch>(
-          arch_tag)>;
+  // using group_swizzle_t =
+  //     gpu::xetla::kernel::group_swizzle_default<static_cast<gpu_arch>(
+  //         arch_tag)>;
 
   using mem_desc_a_t = mem_desc_t<T, mem_layout::row_major, mem_space::global>;
   using mem_desc_b_t =
@@ -323,16 +323,20 @@ struct MoEGEMMINT4 {
       uint32_t tile_m = (gemm_m + wg_tile_m - 1) / wg_tile_m;
       total_tile_m += tile_m;
     }
-    group_swizzle_t::update_group_range(total_tile_m, tile_n);
-    sycl::range<3> local(1, local_range_m, local_range_n);
-    sycl::range<3> global(1, total_tile_m, tile_n);
+    // group_swizzle_t::update_group_range(total_tile_m, tile_n);
+    // sycl::range<3> local(1, local_range_m, local_range_n);
+    // sycl::range<3> global(1, total_tile_m, tile_n);
+    sycl::range<3> local(1, 1, num_sub_group_per_wg);
+    sycl::range<3> global(total_tile_m, tile_n, 1);
     return sycl::nd_range<3>{global * local, local};
   }
 
   void operator()(sycl::nd_item<3> item) const SYCL_ESIMD_KERNEL {
-    group_swizzle_t group_swizzle;
-    int group_m_id = group_swizzle.template get_tile_idx<1>(item);
-    int group_n_id = group_swizzle.template get_tile_idx<2>(item);
+    // group_swizzle_t group_swizzle;
+    // int group_m_id = group_swizzle.template get_tile_idx<1>(item);
+    // int group_n_id = group_swizzle.template get_tile_idx<2>(item);
+    int group_m_id = item.get_group(0);
+    int group_n_id = item.get_group(1);
 
     xetla_nbarrier_init<barrier_count>();
     xetla_local_init<slm_size>();
@@ -351,7 +355,6 @@ struct MoEGEMMINT4 {
 
       xetla_vector<int, load_expert_num> cumsum_rows_for_experts =
           inclusive_prefix_sum<int, load_expert_num, 1>(rows_for_experts);
-
       xetla_vector<int, load_expert_num> cumsum_tiles_for_experts =
           inclusive_prefix_sum<int, load_expert_num, 1>(
               (rows_for_experts + wg_tile_m - 1) / wg_tile_m);
@@ -393,36 +396,38 @@ struct MoEGEMMINT4 {
     mem_desc_b_t mem_desc_b;
     mem_desc_c_t mem_desc_c;
     mem_desc_scale_t mem_desc_scale;
-    int start_x = group_n_id * wg_tile_n;
-    int start_y = skip_m + expert_m_id * wg_tile_m;
-    mem_desc_a.init(
+    int coord_n = group_n_id * wg_tile_n;
+    int coord_m = skip_m + expert_m_id * wg_tile_m;
+    int coord_k = 0;
+    // sycl::ext::oneapi::experimental::printf("gemm_m %d gemm_k %d, coord m,k (%d, %d)\n", gemm_m, gemm_k, coord_m, coord_k);
+    mem_desc_a.init( // confirmed layout of x
         (T*)activation,
         {static_cast<uint32_t>(gemm_k),
          static_cast<uint32_t>(skip_m + gemm_m),
          static_cast<uint32_t>(gemm_k)},
-        {0, start_y});
+        {coord_k, coord_m});
     mem_desc_b.init(
         (int4x8*)current_weights,
         {static_cast<uint32_t>(gemm_n),
          static_cast<uint32_t>(gemm_k) / elements_per_id,
          static_cast<uint32_t>(gemm_k) / elements_per_id},
-        {start_x, 0});
-    mem_desc_c.init(
+        {coord_n, coord_k / elements_per_id});
+    mem_desc_c.init( // confirmed layout of y
         (T*)outputs,
         {static_cast<uint32_t>(gemm_n),
          static_cast<uint32_t>(skip_m + gemm_m),
          static_cast<uint32_t>(gemm_n)},
-        {start_x, start_y});
+        {coord_n, coord_m});
     mem_desc_scale.init(
         (T*)current_scale,
         {static_cast<uint32_t>(gemm_n),
          static_cast<uint32_t>(gemm_k) / group_size,
          static_cast<uint32_t>(gemm_k) / group_size},
-        {start_x, 0});
+        {coord_n, coord_k / group_size});
 
     gemm_t gemm;
     uint32_t inner_loop_start = 0;
-    uint32_t inner_loop_count = (gemm_k + k_stride - 1) / k_stride;
+    uint32_t inner_loop_count = (gemm_k / elements_per_id + k_stride - 1) / k_stride;
     gemm_args_t gemm_args(
         mem_desc_a,
         mem_desc_b,
@@ -430,7 +435,7 @@ struct MoEGEMMINT4 {
         inner_loop_count,
         mem_desc_scale);
     matAcc_t matAcc(0);
-    work_group_t g(item.get_local_linear_id() % work_group_size);
+    work_group_t g(item.get_local_linear_id());
     gemm(g, matAcc, gemm_args, 0, 0);
 
     epilogue_t epilogue;
@@ -465,6 +470,8 @@ cgfs_t LaunchMoEGEMMINT4(
     const int* total_rows_for_each_expert_h,
     const int expert_num) {
   using kernel = MoEGEMMINT4<T, Policy, GS, arch_tag>;
+  printf("x %p w %p y %p s %p\n", activation, weights, outputs, scale);
+  printf("total_rows %d\n", total_rows_for_each_expert_h[0]);
   auto cgf = [=](sycl::handler& cgh) {
     kernel task(
         activation,
