@@ -69,14 +69,13 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
         checking_rtol = 5e-2
     input = torch.rand([m, k], dtype=dtype)
     input_torch = input.cpu()
-    weight = torch.randint(-1024, 1024, size=(k // 8, n), dtype=torch.int32)
-    print(weight[0:2, 0:2].view(torch.uint32))
+    weight = torch.randint(-2147483648, 2147483647, size=(k // 8, n), dtype=torch.int32)
     group_size = min(128, k)
     if per_channel:
         group_size = k
     group_num = k // group_size
 
-    scales = -torch.rand([group_num, n], dtype=dtype)
+    scales = torch.ones([group_num, n], dtype=dtype)
     if qmode == QuantMode.SYM:
         zero_points = None
     # elif qmode == QuantMode.ASYM:
@@ -98,8 +97,19 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     weight_fp = dequantize(
         weight, scales, zero_points, group_size, g_idx
     ).cpu()
-    print(scales[0, 0:2])
-    print(weight_fp[0:16, 0:2])
+    weight_fp_t = weight_fp.t().contiguous()
+    weight = weight.t().contiguous()
+    scales = scales.t().contiguous()
+    out_torch = torch.matmul(input_torch, weight_fp)
+    print('x', input_torch[0:4,0:32])
+    for row in weight[0:4, 0:16].view(torch.uint32):
+        for val in row:
+            print(f"{val:08x}", end=" ")
+        print("")
+    print('w', weight[0:4, 0:8].view(torch.uint32))
+    print('s', scales[0:8, 0:4])
+    print('w_fp_t', weight_fp_t[0:4, 0:32])
+    print("o", out_torch[0:8, 0:16])
     # check gemm
     # with torch.xpu.compute_eng(torch.xpu.XPUComputeEng.XETLA):
     #     out_xetla = torch.ops.torch_ipex.mm_int4(
@@ -110,7 +120,6 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     #         group_size,
     #         g_idx4kernel,
     #     )
-    out_torch = torch.matmul(input_torch, weight_fp)
     dump_dict = {}
     dump_dict['x'] = input_torch.view(torch.uint16).detach().cpu().numpy()
     dump_dict['w'] = weight.detach().cpu().numpy()

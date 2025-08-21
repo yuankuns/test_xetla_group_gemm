@@ -427,7 +427,7 @@ struct MoEGEMMINT4 {
 
     gemm_t gemm;
     uint32_t inner_loop_start = 0;
-    uint32_t inner_loop_count = (gemm_k / elements_per_id + k_stride - 1) / k_stride;
+    uint32_t inner_loop_count = (gemm_k + k_stride - 1) / k_stride;
     gemm_args_t gemm_args(
         mem_desc_a,
         mem_desc_b,
@@ -436,7 +436,7 @@ struct MoEGEMMINT4 {
         mem_desc_scale);
     matAcc_t matAcc(0);
     work_group_t g(item.get_local_linear_id());
-    gemm(g, matAcc, gemm_args, 0, 0);
+    gemm(g, matAcc, gemm_args, 0, 0, group_m_id == 0 and group_n_id == 0 and skip_m == 0);
 
     epilogue_t epilogue;
     epilogue(g, matAcc, mem_desc_c);
