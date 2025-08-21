@@ -714,10 +714,10 @@ class gemm_t<
       //         matC.reg[i] = matB_r.xetla_select<1, 1>(i);
       //     }
       // }
-      if (debug) {
-          for (int i=0; i < 64; ++i)
-              matC.reg[i] = matB_acc.reg[i]; // .xetla_select<1, 1>(i);
-      }
+      // if (debug) {
+      for (int i=0; i < 1024; ++i)
+          matC.reg[i] = matB_acc.reg[i]; // .xetla_select<1, 1>(i);
+      // }
       return;
 
       if constexpr (is_gemv) {
