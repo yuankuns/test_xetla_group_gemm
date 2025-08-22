@@ -70,7 +70,7 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     input = torch.rand([m, k], dtype=dtype)
     input_torch = input.cpu()
     weight = torch.randint(-2147483648, 2147483647, size=(k // 8, n), dtype=torch.int32)
-    group_size = min(128, k)
+    group_size = min(64, k)
     if per_channel:
         group_size = k
     group_num = k // group_size
@@ -99,16 +99,17 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     ).cpu()
     weight_fp_t = weight_fp.t().contiguous()
     weight = weight.t().contiguous()
+    print(weight.shape, weight_fp_t.shape)
     scales = scales.t().contiguous()
     out_torch = torch.matmul(input_torch, weight_fp)
     print('x', input_torch[0:4,0:32])
-    for row in weight[0:4, 0:16].view(torch.uint32):
+    for j,row in enumerate(weight[0:32, 0:16].view(torch.uint32)):
+        print(f"{j:02d}: ", end="")
         for val in row:
             print(f"{val:08x}", end=" ")
         print("")
-    print('w', weight[0:4, 0:8].view(torch.uint32))
     print('s', scales[0:8, 0:4])
-    print('w_fp_t', weight_fp_t[0:4, 0:32])
+    print('w_fp_t', weight_fp_t[0:32, 0:32])
     print("o", out_torch[0:8, 0:16])
     # check gemm
     # with torch.xpu.compute_eng(torch.xpu.XPUComputeEng.XETLA):
@@ -129,4 +130,5 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     np.savez("int4.npz", **dump_dict)
 
 if __name__ == '__main__':
-    test_gemm_int4(123, 128, 512, 256, False, False, QuantMode.SYM, torch.bfloat16)
+    #test_gemm_int4(123, 128, 512, 256, False, False, QuantMode.SYM, torch.bfloat16)
+    test_gemm_int4(123, 32, 128, 64, False, False, QuantMode.SYM, torch.bfloat16)

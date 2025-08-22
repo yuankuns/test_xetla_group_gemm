@@ -1,6 +1,6 @@
 IPEX_HOME = /home/syk/frameworks.ai.pytorch.ipex-gpu/
 CXX = icpx
-CXXFLAGS = -std=c++20 -O1 -fPIC -fsycl -fsycl-targets=spir64_gen
+CXXFLAGS = -std=c++20 -O0 -g -fPIC -fsycl -fsycl-targets=spir64_gen
 # CXXFLAGS = -std=c++20 -O0 -g -fPIC -fsycl -fsycl-targets=spir64_gen
 AOTFLAGS = -Xsycl-target-backend=spir64_gen "-device bmg-g21-a0 -options '-doubleGRF -vc-codegen -Xfinalizer -printregusage'"
 
