@@ -51,14 +51,14 @@ struct none_op_t {
   }
 };
 
-template<typename T>
-struct get_N;
+// template<typename T>
+// struct get_N;
 
-template<typename T, int N>
-struct get_N<__ESIMD_NS::simd<T, N>> {
-    static constexpr int value = N;
-    using dtype = T;
-};
+// template<typename T, int N>
+// struct get_N<__ESIMD_NS::simd<T, N>> {
+//     static constexpr int value = N;
+//     using dtype = T;
+// };
 
 template <
     typename matB_acc_t,
@@ -116,6 +116,12 @@ struct dequant_int4_weight_t {
         // dst_blk bf16 256
         auto dst_blk = matB_acc.reg.xetla_select<matB_acc_t::block_elems, 1>(
             block_id * matB_acc_t::block_elems);
+        // for (int i = 0; i < 256; ++i) {
+        //     auto matB_r=matB.reg
+        //         .xetla_select<matB_acc_t::block_elems / 2, 1>(
+        //             block_id * matB_acc_t::block_elems / 2);
+        //     dst_blk[i] = matB_r[i];
+        // }
         // auto dst_blk1 = matB_acc.reg.xetla_select<matB_acc_t::block_elems / 2, 1>(
         //     block_id * matB_acc_t::block_elems);
         // auto dst_blk2 = matB_acc.reg.xetla_select<matB_acc_t::block_elems / 2, 1>(
@@ -164,23 +170,26 @@ struct dequant_int4_weight_t {
         // correct unroll here trigger numerical issues
         for (uint32_t jj = 0; jj < block_size_x_b; ++jj) {
             for (uint32_t ii = 0; ii < block_size_y_b; ii += steps) {
-                uint32_t offset_y_in_tile = i * block_size_y_b + ii;
-                uint32_t offset_x_in_tile = j * block_size_x_b + jj;
-                // uint32_t scale_idx = 
-                //     offset_y_in_tile * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
-                uint32_t scale_idx = args.wg_start_n + args.wg_start_k;
+                // uint32_t offset_y_in_tile = i * block_size_y_b + ii; // K
+                // uint32_t offset_x_in_tile = j * block_size_x_b + jj; // N
+                // // uint32_t scale_idx = 
+                // //     offset_y_in_tile * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
+                // uint32_t x = j * block_size_x_b;
+                // uint32_t scale_idx = x; // + args.wg_start_k;
                     // (args.wg_start_n + offset_y_in_tile) * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
                 cvt_blk_i16.xetla_select<steps, 1>(jj * block_size_y_b + ii) =
-                  cvt_blk_i16.xetla_select<steps, 1>(jj * block_size_y_b + ii) -
-                  zpt_i16;
-                // dst_blk.xetla_select<steps, 1>(jj * block_size_y_b + ii) = scale_idx;
+                  cvt_blk_i16.xetla_select<steps, 1>(jj * block_size_y_b + ii) - zpt_i16;
                 dst_blk.xetla_select<steps, 1>(jj * block_size_y_b + ii) = cvt_blk_i16.xetla_select<steps, 1>(jj * block_size_y_b + ii); // * scale.reg[scale_idx];
+                // dst_blk.xetla_select<steps, 1>(jj * block_size_y_b + ii) = scale_idx;
             }
         }
         // for (uint32_t k = 0;k < matB_acc_t::block_elems; k += steps) {
-        //     dst_blk.xetla_select<steps, 1>(k) = cvt_blk_i16.xetla_select<steps, 1>(k) - zpt_i16;
+        //     dst_blk.xetla_select<steps, 1>(k) = cvt_blk_i16.xetla_select<steps, 1>(k);// - zpt_i16;
         // }
-        // for (uint32_t ii = 0; ii < matB_acc_t::block_elems; ++ii) {
+        // return;
+        // if (debug)
+        // for (uint32_t ii = 0; ii < 1024; ++ii) {
+        //     // dst_blk[ii] = matB.reg.xetla_select<1, 1>(ii);
         //     dst_blk[ii] = float(sycl::ext::oneapi::bfloat16(cvt_blk_i16.xetla_select<1, 1>(ii))); // - 8.0f;
         // }
       }

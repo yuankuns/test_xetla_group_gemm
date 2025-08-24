@@ -24,6 +24,14 @@
 
 namespace gpu::xetla::group {
 
+// template<typename T>
+// struct get_N;
+
+// template<typename T, int N>
+// struct get_N<__ESIMD_NS::simd<T, N>> {
+//     static constexpr int value = N;
+//     using dtype = T;
+// };
 /// @addtogroup xetla_gemm
 /// @{
 
@@ -73,6 +81,7 @@ class gemm_t<
   static constexpr uint32_t sg_tile_n = tile_shape::sg_tile_size_x;
   static constexpr uint32_t wg_size_x = tile_shape::wg_size_x;
   static constexpr uint32_t wg_size_y = tile_shape::wg_size_y;
+  static constexpr uint32_t wg_size = wg_size_x * wg_size_y;
   using work_group_t = typename tile_shape::work_group_t;
 
   constexpr static gpu_arch arch_tag = compute_policy::arch_tag;
@@ -184,7 +193,10 @@ class gemm_t<
       arch_tag>;
   using matA_acc_t = subgroup::tile_t<dtype_mma_a, matA_tile_desc_t>;
   using matA_prefetch_payload_t = subgroup::
-      prefetch_payload_t<mem_desc_a_t, matA_tile_desc_t, wg_size_x, arch_tag>;
+      prefetch_payload_t<mem_desc_a_t,
+                         subgroup::tile_desc_t<tile_size_x_a, tile_size_y_a, 1, 1>,
+                         wg_size_x,
+                         arch_tag>;
 
   // note: plane format, row-major
   // note: 4bit x 2, row-major
@@ -336,9 +348,13 @@ class gemm_t<
   static constexpr bool enable_periodic_sync = (sync_freq != 0);
   static constexpr uint32_t barrier_count_x = wg_size_y > 1 ? wg_size_x : 0;
   static constexpr uint32_t barrier_count_y = wg_size_x > 1 ? wg_size_y : 0;
-  uint32_t wg_start_m = 0;
-  uint32_t wg_start_n = 0;
-  uint32_t wg_start_k = 0;
+  uint32_t scale_wg_start_m = 0;
+  uint32_t scale_wg_start_n = 0;
+  uint32_t scale_wg_start_k = 0;
+
+  xetla_nbarrier_t<wg_size, wg_size, arch_tag> barrier_all;
+  xetla_nbarrier_t<wg_size_x, wg_size_x, arch_tag> nbarrier_a;
+  xetla_nbarrier_t<wg_size_y, wg_size_y, arch_tag> nbarrier_b;
 
  public:
   static constexpr uint32_t barrier_count =
@@ -437,6 +453,61 @@ class gemm_t<
     }
   };
 
+  inline void periodic_sync_init(
+      [[maybe_unused]] int32_t sg_idx,
+      [[maybe_unused]] int32_t sg_idy,
+      uint32_t nbarrier_base) {
+    if constexpr (enable_periodic_sync) {
+      if constexpr (arch_has_named_barrier<arch_tag>) {
+        if constexpr (wg_size_x > 1) {
+          nbarrier_a.init_nbarrier(
+              sg_idy + nbarrier_base, nbarrier_role::producer_consumer);
+        }
+        if constexpr (wg_size_y > 1) {
+          nbarrier_b.init_nbarrier(
+              sg_idx + barrier_count_y + nbarrier_base,
+              nbarrier_role::producer_consumer);
+        }
+      } else if constexpr (wg_size > 1) {
+        barrier_all.init_nbarrier(
+            nbarrier_base, nbarrier_role::producer_consumer);
+      }
+    }
+  }
+
+  inline void periodic_sync_arrive(uint32_t iter_num) {
+    if constexpr (enable_periodic_sync) {
+      if ((iter_num % sync_freq) == 0) {
+        if constexpr (arch_has_named_barrier<arch_tag>) {
+          if constexpr (wg_size_x > 1) {
+            nbarrier_a.arrive();
+          }
+          if constexpr (wg_size_y > 1) {
+            nbarrier_b.arrive();
+          }
+        } else if constexpr (wg_size > 1) {
+          barrier_all.arrive();
+        }
+      }
+    }
+  }
+
+  inline void periodic_sync_wait(uint32_t iter_num) {
+    if constexpr (enable_periodic_sync) {
+      if ((iter_num % sync_freq) == 0) {
+        if constexpr (arch_has_named_barrier<arch_tag>) {
+          if constexpr (wg_size_x > 1) {
+            nbarrier_a.wait();
+          }
+          if constexpr (wg_size_y > 1) {
+            nbarrier_b.wait();
+          }
+        } else if constexpr (wg_size > 1) {
+          barrier_all.wait();
+        }
+      }
+    }
+  }
   /// @brief Gets the subgroup-level tile offset x.
   /// @param g Is the workgroup of the current tile.
   /// @return Subgroup-level tile offset x.
@@ -491,8 +562,8 @@ class gemm_t<
       [[maybe_unused]] bool debug = false) {
     int32_t sg_idx = g.get_id() % wg_size_x;
     int32_t sg_idy = g.get_id() / wg_size_x;
-    update_sg_tile_tdesc(args, sg_idx, sg_idy);
 
+    update_sg_tile_tdesc(args, sg_idx, sg_idy);
     matA_t matA;
     matB_t matB;
     scale_t scale;
@@ -509,20 +580,15 @@ class gemm_t<
     scale_prefetch_payload_t scale_prefetch_payload(args.scale_base_desc, 0);
     zero_pt_prefetch_payload_t zero_pt_prefetch_payload(
         args.zero_pt_base_desc, 0);
+    if (debug)
+        sycl::ext::oneapi::experimental::printf("sg_idx %d sg_idy %d A x,y (%d, %d)\n", sg_idx, sg_idy, args.matA_base_desc.coord.x, args.matA_base_desc.coord.y);
 
-    wg_start_m = args.matA_base_desc.coord.y;
-    wg_start_n = args.scale_base_desc.coord.x;
-    wg_start_k = args.matA_base_desc.coord.x;
-    typename dequantize_t::arguments_t dequantize_args{wg_start_n, wg_start_k};
+    // scale m always 0
+    scale_wg_start_n = args.scale_base_desc.coord.y; // args.matB_base_desc.coord.y;//wg_start_n
+    scale_wg_start_k = args.matB_base_desc.coord.x; // args.matB_base_desc.coord.x; //wg_start_k
+    typename dequantize_t::arguments_t dequantize_args{scale_wg_start_n, scale_wg_start_k};
     dequantize_t dequantize;
 
-    xetla_nbarrier_t<wg_size_x, wg_size_x, arch_tag> nbarrier_a;
-    nbarrier_a.init_nbarrier(
-        sg_idy + nbarrier_base, nbarrier_role::producer_consumer);
-    xetla_nbarrier_t<wg_size_y, wg_size_y, arch_tag> nbarrier_b;
-    nbarrier_b.init_nbarrier(
-        sg_idx + barrier_count_y + nbarrier_base,
-        nbarrier_role::producer_consumer);
 
     int scale_prefetch_addr_i = args.inner_loop_start;
     int tile_k_idx = args.inner_loop_start;
@@ -532,168 +598,161 @@ class gemm_t<
         stages < args.inner_loop_count ? args.inner_loop_count - stages : 0;
     uint32_t compute_stages =
         stages < args.inner_loop_count ? stages : args.inner_loop_count;
-    for (uint32_t i = 0; i < prefetch_stages; i++) {
-      subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-          matA_prefetch_payload);
-      subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-          matB_prefetch_payload);
-      // TODO 1D prefetch need pack to U32/U64
-      subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-          scale_prefetch_payload);
-      if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-        // TODO 1D prefetch need pack to U32/U64
-        subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-            zero_pt_prefetch_payload);
-      }
-      scale_prefetch_addr_i++;
-      matA_prefetch_payload.template update_tdesc<update_dir_a>(
-          matA_t::tile_size_x);
-      matB_prefetch_payload.template update_tdesc<update_dir_b>(
-          matB_t::tile_size_y);
-      if ((scale_prefetch_addr_i % scale_addr_update_freq) == 0) {
-        scale_prefetch_payload.template update_tdesc<update_dir_b>(
-            scale_t::tile_size_y);
-        if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-          zero_pt_prefetch_payload
-              .template update_tdesc<tdesc_update_dir::y_dir>(
-                  zero_pt_t::tile_size_y);
-        }
-      }
-    }
-    for (uint32_t i = 0; i < prefetch_compute_stages; i++) {
-      if constexpr (enable_periodic_sync) {
-        if ((i % sync_freq) == 0) {
-          if constexpr (wg_size_x > 1) {
-            nbarrier_a.arrive();
-          }
-          if constexpr (arch_has_named_barrier<arch_tag>) {
-            if constexpr (wg_size_y > 1) {
-              nbarrier_b.arrive();
-            }
-          }
-        }
-      }
+    // for (uint32_t i = 0; i < prefetch_stages; i++) {
+    //   subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //       matA_prefetch_payload);
+    //   subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //       matB_prefetch_payload);
+    //   // TODO 1D prefetch need pack to U32/U64
+    //   subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //       scale_prefetch_payload);
+    //   if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+    //     // TODO 1D prefetch need pack to U32/U64
+    //     subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //         zero_pt_prefetch_payload);
+    //   }
+    //   scale_prefetch_addr_i++;
+    //   matA_prefetch_payload.template update_tdesc<update_dir_a>(
+    //       matA_t::tile_size_x);
+    //   matB_prefetch_payload.template update_tdesc<update_dir_b>(
+    //       matB_t::tile_size_y);
+    //   if ((scale_prefetch_addr_i % scale_addr_update_freq) == 0) {
+    //     scale_prefetch_payload.template update_tdesc<update_dir_b>(
+    //         scale_t::tile_size_y);
+    //     if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+    //       zero_pt_prefetch_payload
+    //           .template update_tdesc<tdesc_update_dir::y_dir>(
+    //               zero_pt_t::tile_size_y);
+    //     }
+    //   }
+    // }
+    // for (uint32_t i = 0; i < prefetch_compute_stages; i++) {
+    //   if constexpr (enable_periodic_sync) {
+    //     if ((i % sync_freq) == 0) {
+    //       if constexpr (wg_size_x > 1) {
+    //         nbarrier_a.arrive();
+    //       }
+    //       if constexpr (arch_has_named_barrier<arch_tag>) {
+    //         if constexpr (wg_size_y > 1) {
+    //           nbarrier_b.arrive();
+    //         }
+    //       }
+    //     }
+    //   }
+    //   subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
+    //       matA, matA_payload);
+    //   subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
+    //       matB, matB_payload);
+    //   // subgroup::tile_load<cache_hint::uncached, cache_hint::uncached>(
+    //   //     matB, matB_payload);
+    //   subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
+    //       scale, scale_payload);
+    //   if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+    //     subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
+    //         zero_pt, zero_pt_payload);
+    //   }
+    //   tile_k_idx++;
+    //   if constexpr (stages != 0) {
+    //     subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //         matA_prefetch_payload);
+    //     subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //         matB_prefetch_payload);
+    //     // TODO 1D prefetch need pack to U32/U64
+    //     subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //         scale_prefetch_payload);
+    //     if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+    //       // TODO 1D prefetch need pack to U32/U64
+    //       subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
+    //           zero_pt_prefetch_payload);
+    //     }
+    //     scale_prefetch_addr_i++;
+    //   }
+    //   matA_payload.template update_tdesc<update_dir_a>(matA_t::tile_size_x);
+    //   matB_payload.template update_tdesc<update_dir_b>(matB_t::tile_size_y);
+    //   if (tile_k_idx % scale_addr_update_freq == 0) {
+    //     scale_payload.template update_tdesc<update_dir_b>(scale_t::tile_size_y);
+    //   }
+    //   if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+    //     if (tile_k_idx % zero_pt_addr_update_freq == 0) {
+    //       zero_pt_payload.template update_tdesc<tdesc_update_dir::y_dir>(
+    //           zero_pt_t::tile_size_y);
+    //     }
+    //   }
+    //   if constexpr (stages != 0) {
+    //     matA_prefetch_payload.template update_tdesc<update_dir_a>(
+    //         matA_t::tile_size_x);
+    //     matB_prefetch_payload.template update_tdesc<update_dir_b>(
+    //         matB_t::tile_size_y);
+    //     if ((scale_prefetch_addr_i % scale_addr_update_freq) == 0) {
+    //       scale_prefetch_payload.template update_tdesc<tdesc_update_dir::y_dir>(
+    //           scale_t::tile_size_y);
+    //       if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+    //         zero_pt_prefetch_payload
+    //             .template update_tdesc<tdesc_update_dir::y_dir>(
+    //                 zero_pt_t::tile_size_y);
+    //       }
+    //     }
+    //   }
+    //   matA_acc_t matA_acc;
+    //   matB_acc_t matB_acc;
+    //   // if constexpr (is_vnni_tiled_a) {
+    //   //   subgroup::vnni_reverse(matA);
+    //   // }
+    //   // subgroup::elemwise_cvt(matA_acc, matA);
+    //   for (int i = 0; i < 512; ++i) {
+    //       matA_acc.reg[i] = matA.reg[i];
+    //   }
+    //   dequantize(matB_acc, matB, scale, zero_pt, dequantize_args);
+
+    //   if constexpr (is_gemv) {
+    //     tile_mma::mma(
+    //         matAcc,
+    //         matAcc,
+    //         matC,
+    //         matB_acc,
+    //         matA_acc,
+    //         i == args.inner_loop_count - 1);
+    //   } else {
+    //     if constexpr (is_col_major_b) {
+    //       tile_transpose(matB_acc);
+    //     }
+    //     tile_mma::mma(matC, matC, matB_acc, matA_acc);
+    //   }
+    //   if constexpr (enable_periodic_sync) {
+    //     if ((i % sync_freq) == 0) {
+    //       if constexpr (wg_size_x > 1) {
+    //         nbarrier_a.wait();
+    //       }
+    //       if constexpr (arch_has_named_barrier<arch_tag>) {
+    //         if constexpr (wg_size_y > 1) {
+    //           nbarrier_b.wait();
+    //         }
+    //       }
+    //     }
+    //   }
+    // }
+    periodic_sync_init(sg_idx, sg_idy, nbarrier_base);
+    // for (uint32_t i = 0; i < compute_stages; i++) {
+    for (uint32_t i = 0; i < args.inner_loop_count; i++) {
+        periodic_sync_arrive(i);
       subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
           matA, matA_payload);
       subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
           matB, matB_payload);
       // subgroup::tile_load<cache_hint::uncached, cache_hint::uncached>(
-      //     matB, matB_payload);
-      subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
-          scale, scale_payload);
-      if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-        subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
-            zero_pt, zero_pt_payload);
-      }
-      tile_k_idx++;
-      if constexpr (stages != 0) {
-        subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-            matA_prefetch_payload);
-        subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-            matB_prefetch_payload);
-        // TODO 1D prefetch need pack to U32/U64
-        subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-            scale_prefetch_payload);
-        if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-          // TODO 1D prefetch need pack to U32/U64
-          subgroup::tile_prefetch<cache_hint::cached, cache_hint::cached>(
-              zero_pt_prefetch_payload);
-        }
-        scale_prefetch_addr_i++;
-      }
-      matA_payload.template update_tdesc<update_dir_a>(matA_t::tile_size_x);
-      matB_payload.template update_tdesc<update_dir_b>(matB_t::tile_size_y);
-      if (tile_k_idx % scale_addr_update_freq == 0) {
-        scale_payload.template update_tdesc<update_dir_b>(scale_t::tile_size_y);
-      }
-      if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-        if (tile_k_idx % zero_pt_addr_update_freq == 0) {
-          zero_pt_payload.template update_tdesc<tdesc_update_dir::y_dir>(
-              zero_pt_t::tile_size_y);
-        }
-      }
-      if constexpr (stages != 0) {
-        matA_prefetch_payload.template update_tdesc<update_dir_a>(
-            matA_t::tile_size_x);
-        matB_prefetch_payload.template update_tdesc<update_dir_b>(
-            matB_t::tile_size_y);
-        if ((scale_prefetch_addr_i % scale_addr_update_freq) == 0) {
-          scale_prefetch_payload.template update_tdesc<tdesc_update_dir::y_dir>(
-              scale_t::tile_size_y);
-          if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-            zero_pt_prefetch_payload
-                .template update_tdesc<tdesc_update_dir::y_dir>(
-                    zero_pt_t::tile_size_y);
-          }
-        }
-      }
-      matA_acc_t matA_acc;
-      matB_acc_t matB_acc;
-      if constexpr (is_vnni_tiled_a) {
-        subgroup::vnni_reverse(matA);
-      }
-      subgroup::elemwise_cvt(matA_acc, matA);
-
-      dequantize(matB_acc, matB, scale, zero_pt, dequantize_args);
-
-      if constexpr (is_gemv) {
-        tile_mma::mma(
-            matAcc,
-            matAcc,
-            matC,
-            matB_acc,
-            matA_acc,
-            i == args.inner_loop_count - 1);
-      } else {
-        if constexpr (is_col_major_b) {
-          tile_transpose(matB_acc);
-        }
-        tile_mma::mma(matC, matC, matB_acc, matA_acc);
-      }
-      if constexpr (enable_periodic_sync) {
-        if ((i % sync_freq) == 0) {
-          if constexpr (wg_size_x > 1) {
-            nbarrier_a.wait();
-          }
-          if constexpr (arch_has_named_barrier<arch_tag>) {
-            if constexpr (wg_size_y > 1) {
-              nbarrier_b.wait();
-            }
-          }
-        }
-      }
-    }
-    for (uint32_t i = 0; i < compute_stages; i++) {
-      if constexpr (enable_periodic_sync) {
-        if ((i % sync_freq) == 0) {
-          if constexpr (wg_size_x > 1) {
-            nbarrier_a.arrive();
-          }
-          if constexpr (arch_tag >= gpu_arch::XeHpc) {
-            if constexpr (wg_size_y > 1) {
-              nbarrier_b.arrive();
-            }
-          }
-        }
-      }
-      subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
-          matA, matA_payload);
-      subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
-          matB, matB_payload);
-      // subgroup::tile_load<cache_hint::uncached, cache_hint::uncached>(
-      //     matB, matB_payload);
-      subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
-          scale, scale_payload);
-      if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-        subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
-            zero_pt, zero_pt_payload);
-      }
+      //     matB, matB_payload); 
+      // subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
+      //     scale, scale_payload); // hang
+      // if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+      //   subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
+      //       zero_pt, zero_pt_payload); // hang
+      // }
       tile_k_idx++;
       matA_payload.template update_tdesc<update_dir_a>(matA_t::tile_size_x);
       matB_payload.template update_tdesc<update_dir_b>(matB_t::tile_size_y);
-      if (tile_k_idx % scale_addr_update_freq == 0) {
-        scale_payload.template update_tdesc<update_dir_b>(scale_t::tile_size_y);
-      }
+      // if (tile_k_idx % scale_addr_update_freq == 0) {
+      //   scale_payload.template update_tdesc<update_dir_b>(scale_t::tile_size_y);
+      // }
       if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
         if (tile_k_idx % zero_pt_addr_update_freq == 0) {
           zero_pt_payload.template update_tdesc<tdesc_update_dir::y_dir>(
@@ -702,10 +761,16 @@ class gemm_t<
       }
       matA_acc_t matA_acc;
       matB_acc_t matB_acc;
-      if constexpr (is_vnni_tiled_a) {
-        subgroup::vnni_reverse(matA);
+      // if constexpr (is_vnni_tiled_a) {
+      //   subgroup::vnni_reverse(matA);
+      // }
+      // matA dtype=2 size=512
+      // matAacc dtype-2 size=512
+      // subgroup::elemwise_cvt(matA_acc, matA);
+      for (int k = 0; k < get_N<decltype(matA.reg)>::value; ++k) {
+          matA_acc.reg[k] = matA.reg[k];
       }
-      subgroup::elemwise_cvt(matA_acc, matA);
+      // matA_acc.reg = matA.reg;
 
       dequantize(matB_acc, matB, scale, zero_pt, dequantize_args, debug);
       // if (debug) {
@@ -715,32 +780,24 @@ class gemm_t<
       //     }
       // }
       // if (debug) {
-      for (int i=0; i < 1024; ++i)
-          matC.reg[i] = matB_acc.reg[i]; // .xetla_select<1, 1>(i);
+      // if (i == 0)
+      //     for (int k = 0; k < get_N<decltype(matB_acc.reg)>::value; ++k) {
+      //         matC.reg[k] = matB_acc.reg[k];
+      //     }
       // }
-      return;
-
-      if constexpr (is_gemv) {
-        tile_mma::mma(
-            matAcc, matAcc, matC, matB_acc, matA_acc, i == compute_stages - 1);
-      } else {
-        if constexpr (is_col_major_b) {
-          tile_transpose(matB_acc);
-        }
-        tile_mma::mma(matC, matC, matB_acc, matA_acc);
-      }
-      if constexpr (enable_periodic_sync) {
-        if ((i % sync_freq) == 0) {
-          if constexpr (wg_size_x > 1) {
-            nbarrier_a.wait();
-          }
-          if constexpr (arch_tag >= gpu_arch::XeHpc) {
-            if constexpr (wg_size_y > 1) {
-              nbarrier_b.wait();
-            }
-          }
-        }
-      }
+          // matC.reg[0] = get_N<decltype(matA_acc.reg)>::value; // .xetla_select<1, 1>(i);
+          // matC.reg[1] = sizeof(typename get_N<decltype(matA_acc.reg)>::dtype); // .xetla_select<1, 1>(i);
+      // }
+      // if constexpr (is_gemv) {
+      //   tile_mma::mma(
+      //       matAcc, matAcc, matC, matB_acc, matA_acc, i == compute_stages - 1);
+      // } else {
+      //   if constexpr (is_col_major_b) {
+      tile_transpose(matB_acc);
+      //   }
+      tile_mma::mma(matC, matC, matB_acc, matA_acc);
+      // }
+      periodic_sync_wait(i);
     }
   }
 

@@ -103,7 +103,7 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     scales = scales.t().contiguous()
     out_torch = torch.matmul(input_torch, weight_fp)
     print('x', input_torch[0:4,0:32])
-    for j,row in enumerate(weight[0:32, 0:16].view(torch.uint32)):
+    for j,row in enumerate(weight[0:64, 0:16].view(torch.uint32)):
         print(f"{j:02d}: ", end="")
         for val in row:
             print(f"{val:08x}", end=" ")
