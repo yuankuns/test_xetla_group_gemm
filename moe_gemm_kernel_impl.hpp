@@ -4,11 +4,12 @@
 #include <xetla.hpp>
 #include <vector>
 // #include "../../moe_gemm.h"
+using cgf_t = std::function<void(sycl::handler&)>;
+using cgfs_t = std::vector<cgf_t>;
+#include "gemm_int4.h"
 
 namespace gpu {
 namespace xetla {
-using cgf_t = std::function<void(sycl::handler&)>;
-using cgfs_t = std::vector<cgf_t>;
 
 template <typename T, int N, int Start>
 inline typename std::enable_if_t<(N == Start), xetla_vector<T, N>>
@@ -438,7 +439,7 @@ struct MoEGEMMINT4 {
     bool debug = group_m_id == 0 and group_n_id == 0 and skip_m == 0 and item.get_local_linear_id() == 0;
     // if (debug)
     //     sycl::ext::oneapi::experimental::printf("gemm_m %d gemm_k %d, gemm_n %d, coord m,n (%d, %d) sg %d\n", gemm_m, gemm_k, gemm_n, start_y, start_x, item.get_local_linear_id());
-    gemm(g, matAcc, gemm_args, 0, 0, debug);
+    // gemm(g, matAcc, gemm_args, 0, 0, debug); //disable temp
 
     epilogue_t epilogue;
     epilogue(g, matAcc, mem_desc_c);
@@ -489,6 +490,112 @@ cgfs_t LaunchMoEGEMMINT4(
         task);
   };
   return {cgf};
+}
+
+template <
+    typename T,
+    typename Policy,
+    int GS = 128,
+    gpu_arch arch_tag = gpu_arch::XeHpc>
+cgfs_t LaunchMoEGEMMINT4HGEMM(
+    sycl::queue& queue,
+    const T* activation,
+    const uint32_t* weights,
+    const T* scale,
+    T* outputs,
+    const int total_m,
+    const int gemm_n,
+    const int gemm_k,
+    const int* total_rows_for_each_expert,
+    const int* total_rows_for_each_expert_h,
+    const int expert_num) {
+    using torch_ipex::xpu::xetla::dtype_zp;
+    using torch_ipex::xpu::xetla::hgemm_wint4_func;
+    constexpr quant_mode q_mode = quant_mode::I4_SYM;
+    constexpr int L3_KS = 1;
+    constexpr int WG_M = 128;
+    constexpr int WG_N = 128;
+    constexpr int SG_M = 16;
+    constexpr int SG_N = 32;
+    constexpr int SG_K = 64;
+    constexpr int SLM_KS = 1;
+    using data_type_a = T;
+    using data_type_b = int4x8;
+    using data_type_c = T;
+    using data_type_zp = int4x8;
+    using data_type_scale = T;
+    using data_type_acc = float;
+    // using data_type_bias = T;
+    // using mem_desc_bias_t = mem_desc_t<
+    //     data_type_bias,
+    //     mem_layout::row_major,
+    //     mem_space::global,
+    //     DEVICE_MEM_ALIGNMENT / sizeof(data_type_bias)>;
+    // using bias_op_t =
+    //     subgroup::bias_add_op_t<mem_desc_bias_t, static_cast<gpu_arch>(ARCH)>;
+    // using post_op = subgroup::chained_tile_op_t<bias_op_t>;
+    using post_op = subgroup::chained_tile_op_t<>;
+  using kernel = hgemm_wint4_func<
+      data_type_a,
+      data_type_b,
+      data_type_c,
+      data_type_zp,
+      data_type_scale,
+      data_type_acc,
+      q_mode,
+      WG_M,
+      WG_N,
+      SG_M,
+      SG_N,
+      SG_K,
+      L3_KS,
+      SLM_KS,
+      2,
+      // static_castgpu::xetla::gpu_arch::XeHpc,
+      GS,
+      1,
+      3,
+      post_op>;
+
+  printf("x %p w %p y %p s %p\n", activation, weights, outputs, scale);
+  printf("total_rows %d\n", total_rows_for_each_expert_h[0]);
+  const auto w_alias = reinterpret_cast<const data_type_b *>(weights);
+  cgfs_t cgfs;
+  // for (int i = 0; i < expert_num; ++i) {
+  for (int i = 0; i < expert_num; ++i) {
+      int gemm_m = total_rows_for_each_expert_h[i];
+      if (gemm_m>0)
+          sycl::ext::oneapi::experimental::printf(
+              "gemm_m %d gemm_k %d, gemm_n %d, X %p, W %p, O %p S %p\n", gemm_m, gemm_k, gemm_n, activation, w_alias, outputs, scale);
+          cgfs.push_back(
+              kernel::run(
+                  const_cast<T *>(activation),
+                  const_cast<data_type_b * >(w_alias),
+                  outputs,
+                  nullptr,
+                  nullptr,
+                  gemm_m,
+                  gemm_n,
+                  gemm_k,
+                  nullptr,
+                  const_cast<T * >(scale))
+              );
+  }
+  // auto cgf = [=](sycl::handler& cgh) {
+  //   kernel task(
+  //       activation,
+  //       weights,
+  //       scale,
+  //       outputs,
+  //       gemm_n,
+  //       gemm_k,
+  //       total_rows_for_each_expert,
+  //       expert_num);
+  //   cgh.parallel_for(
+  //       kernel::get_nd_range(total_rows_for_each_expert_h, gemm_n, expert_num),
+  //       task);
+  // };
+  return cgfs;
 }
 
 template <typename T, typename Policy, fp8_format f_format, gpu_arch arch_tag>
