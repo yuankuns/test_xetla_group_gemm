@@ -75,6 +75,7 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
         group_size = k
     group_num = k // group_size
 
+    # scales = torch.randn([group_num, n], dtype=dtype)
     scales = torch.ones([group_num, n], dtype=dtype)
     if qmode == QuantMode.SYM:
         zero_points = None

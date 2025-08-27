@@ -265,7 +265,7 @@ struct MoEGEMMINT4 {
   static constexpr quant_info quant_info_{
       q_mode,
       gs == 0 ? 131072 : gs,
-      mem_layout::col_major};
+      mem_layout::col_major}; // no effect
 
   using compute_attr = group::compute_attr_t<T, T, accum_t>;
   using perf_tuning_knob =

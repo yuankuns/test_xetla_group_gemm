@@ -5,7 +5,7 @@
 #include "xetla.h"
 //#include "xetla_arch.h"
 #include "cnpy.h"
-
+#include "util.hpp"
 #include "moe_gemm_kernel_impl.hpp"
 #include "moe_gemm_policy.hpp"
 #include "launch_kernels.hpp"
@@ -126,36 +126,37 @@ void test_group_gemm() {
     q.wait();
     printf("output:\n");
     T *ptr= reinterpret_cast<T * >(out_buf);
-    for (int i = 0; i < 1024; ++i) {
-        if (i % 16 == 0)
-            printf("(%03d)", i);
-        printf("%7.4f, ", (float)ptr[i]);
-        if (i % 16 == 15)
-            printf("\n");
-    }
-    printf("test:\n");
-    for (int m = 0; m < M; ++m) {
-        for (int n = 0; n < N; ++n) {
-            if (n % 16 == 0)
-                printf("(%03d,%03d): ", m, n);
-            printf("%7.4f, ", (float)y_test[m * N + n]);
-            if (n % 16 == 15)
-                printf("\n");
-        }
-        printf("\n");
-    }
-    printf("\nrefe:\n");
-    for (int m = 0; m < std::min(64, M); ++m) {
-        for (int n = 0; n < std::min(128, N); ++n) {
-            if (n % 16 == 0)
-                printf("(%03d,%03d): ", m, n);
-            printf("%7.4f, ", (float)y_npy.data<T>()[m * N + n]);
-            if (n % 16 == 15)
-                printf("\n");
-        }
-        printf("\n");
-    }
-    printf("\n");
+    // for (int i = 0; i < 1024; ++i) {
+    //     if (i % 16 == 0)
+    //         printf("(%03d)", i);
+    //     printf("%7.4f, ", (float)ptr[i]);
+    //     if (i % 16 == 15)
+    //         printf("\n");
+    // }
+    // printf("test:\n");
+    // for (int m = 0; m < M; ++m) {
+    //     for (int n = 0; n < N; ++n) {
+    //         if (n % 16 == 0)
+    //             printf("(%03d,%03d): ", m, n);
+    //         printf("%7.4f, ", (float)y_test[m * N + n]);
+    //         if (n % 16 == 15)
+    //             printf("\n");
+    //     }
+    //     printf("\n");
+    // }
+    // printf("\nrefe:\n");
+    // for (int m = 0; m < std::min(64, M); ++m) {
+    //     for (int n = 0; n < std::min(128, N); ++n) {
+    //         if (n % 16 == 0)
+    //             printf("(%03d,%03d): ", m, n);
+    //         printf("%7.4f, ", (float)y_npy.data<T>()[m * N + n]);
+    //         if (n % 16 == 15)
+    //             printf("\n");
+    //     }
+    //     printf("\n");
+    // }
+    // printf("\n");
+    verify(y_test, y_npy.data<T>(), M, N, 1e-4, 1e-4);
     // T * bf16_ptr=reinterpret_cast<T *>(offset_rows_for_each_expert_h);
     // for (int i = 0; i < expert_num; ++i) {
     //     printf("%f ", (float)(bf16_ptr[i]));
