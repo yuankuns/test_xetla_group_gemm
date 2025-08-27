@@ -142,9 +142,12 @@ struct dequant_int4_weight_t {
     // return;
         // int8 includes 2 4bits data.
         // constexpr int32_t steps = 16;
-        constexpr uint32_t steps = std::min(block_size_y_b, dequant_s);
+        static_assert(block_size_y_b <= dequant_s && "block_size_y_b must be smaller or equal to dequant_s");
+        static_assert(dequant_s % block_size_y_b == 0 && "dequant_s must be dividiable by block_size_y_b");
+        constexpr uint32_t step = block_size_y_b;
+        // cvt_blk_i16 u16 256 for cast u4->u16
         xetla_vector<int16_t, matB_acc_t::block_elems> cvt_blk_i16 = 0;
-        xetla_vector<int16_t, steps> zpt_i16 = int16_t(8);
+        xetla_vector<int16_t, step> zpt_i16 = int16_t(8);
         // lowest 4 bit
         cvt_blk_i16.xetla_select<matB_acc_t::block_elems / 2, 2>(0) =
             matB_blk & 0xf;
@@ -169,7 +172,7 @@ struct dequant_int4_weight_t {
         // dst_blk.xetla_select<1, 1>(10) = sizeof(typename get_N<decltype(matB_acc.reg)>::dtype); // 2
         // correct unroll here trigger numerical issues
         for (uint32_t jj = 0; jj < block_size_x_b; ++jj) {
-            for (uint32_t ii = 0; ii < block_size_y_b; ii += steps) {
+            for (uint32_t ii = 0; ii < block_size_y_b; ii += step) {
                 // uint32_t offset_y_in_tile = i * block_size_y_b + ii; // K
                 // uint32_t offset_x_in_tile = j * block_size_x_b + jj; // N
                 // // uint32_t scale_idx = 
@@ -177,12 +180,44 @@ struct dequant_int4_weight_t {
                 // uint32_t x = j * block_size_x_b;
                 // uint32_t scale_idx = x; // + args.wg_start_k;
                     // (args.wg_start_n + offset_y_in_tile) * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
-                cvt_blk_i16.xetla_select<steps, 1>(jj * block_size_y_b + ii) =
-                  cvt_blk_i16.xetla_select<steps, 1>(jj * block_size_y_b + ii) - zpt_i16;
-                dst_blk.xetla_select<steps, 1>(jj * block_size_y_b + ii) = cvt_blk_i16.xetla_select<steps, 1>(jj * block_size_y_b + ii); // * scale.reg[scale_idx];
+                cvt_blk_i16.xetla_select<step, 1>(jj * block_size_y_b + ii) =
+                  cvt_blk_i16.xetla_select<step, 1>(jj * block_size_y_b + ii) - zpt_i16;
+                dst_blk.xetla_select<step, 1>(jj * block_size_y_b + ii) = cvt_blk_i16.xetla_select<step, 1>(jj * block_size_y_b + ii); // * scale.reg[scale_idx];
                 // dst_blk.xetla_select<steps, 1>(jj * block_size_y_b + ii) = scale_idx;
             }
         }
+
+        /*
+        for (uint32_t jj = 0; jj < block_size_x_b / 2; jj += 2) {
+            // uint32_t offset_y_in_tile = i * block_size_y_b + ii; // K
+            // uint32_t offset_x_in_tile = j * block_size_x_b + jj; // N
+            // // uint32_t scale_idx = 
+            // //     offset_y_in_tile * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
+            // uint32_t x = j * block_size_x_b;
+            // uint32_t scale_idx = x; // + args.wg_start_k;
+            // (args.wg_start_n + offset_y_in_tile) * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
+            auto src0 = cvt_blk_i16.xetla_select<step, 1>(jj * step);
+            auto src1 = cvt_blk_i16.xetla_select<step, 1>((jj + 1) * step);
+            // src0 = src0 - zpt_i16;
+            // src1 = src1 - zpt_i16;
+            // src 2 (src0+src1) *step=2step
+            // dst_blk step / 2 * 4=2step
+            int kk = jj * 2;
+            dst_blk.xetla_select<step / 2, step * 2>(kk) = src0.xetla_select<step / 2, 2>(0);
+            dst_blk.xetla_select<step / 2, step * 2>(kk + 1) = src0.xetla_select<step / 2, 2>(1);
+            dst_blk.xetla_select<step / 2, step * 2>(kk + 2) = src1.xetla_select<step / 2, 2>(0);
+            dst_blk.xetla_select<step / 2, step * 2>(kk + 3) = src1.xetla_select<step / 2, 2>(1);
+            // dst_blk.xetla_select<step, 1>((jj + 1) * step) = src1;
+            // auto src0_u32 = cvt_blk_i16.template bit_cast_view<uint32_t>()
+            //     .template select<step / 2, 1>(jj * step / 2);
+            // auto src1_u32 = cvt_blk_i16.template bit_cast_view<uint32_t>()
+            //     .template select<step / 2, 1>((jj + 1) * step / 2);
+            // auto dst_u32 = dst_blk.template bit_cast_view<uint32_t>()
+            //     .template select<step, 1>(jj * step / 2);
+            // dst_u32.template select<step / 2, 2>(0) = src0_u32;
+            // dst_u32.template select<step / 2, 2>(1) = src1_u32;
+        }
+        */
         // for (uint32_t k = 0;k < matB_acc_t::block_elems; k += steps) {
         //     dst_blk.xetla_select<steps, 1>(k) = cvt_blk_i16.xetla_select<steps, 1>(k);// - zpt_i16;
         // }

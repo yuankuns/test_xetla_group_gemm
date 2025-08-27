@@ -34,7 +34,16 @@ namespace gpu::xetla::group {
 // };
 /// @addtogroup xetla_gemm
 /// @{
-
+template<typename T>
+void debug_dump(T &mat, uint16_t *out) {
+    constexpr size_t step = 32;
+    auto reg_16 = mat.reg.xetla_format<uint16_t>();
+    for (size_t i = 0; i < get_N<decltype(mat.reg)>::value; i += step) {
+        xetla_store_global<uint16_t, step,
+                           cache_hint::write_back, cache_hint::write_back>(
+                               out, i *sizeof(uint16_t), reg_16.xetla_select<step, 1>(i));
+    }
+}
 /// @brief Is the gemm functor for Xe architecture and matrix engine.
 template <
     typename compute_attr_,
@@ -557,6 +566,7 @@ class gemm_t<
       work_group_t& g,
       matC_t& matC,
       arguments_t args,
+      uint16_t *out_buf,
       [[maybe_unused]] uint32_t slm_base = 0,
       uint32_t nbarrier_base = 0,
       [[maybe_unused]] bool debug = false) {
@@ -761,17 +771,37 @@ class gemm_t<
       }
       matA_acc_t matA_acc;
       matB_acc_t matB_acc;
+      matB_acc_t matB2_acc;
       // if constexpr (is_vnni_tiled_a) {
       //   subgroup::vnni_reverse(matA);
       // }
       // matA dtype=2 size=512
       // matAacc dtype-2 size=512
-      // subgroup::elemwise_cvt(matA_acc, matA);
-      for (int k = 0; k < get_N<decltype(matA.reg)>::value; ++k) {
-          matA_acc.reg[k] = matA.reg[k];
-      }
+      subgroup::elemwise_cvt(matA_acc, matA);
+      // if (i == 0 and debug) {
+      //     debug_dump(matA_acc, out_buf);
+      // }
+      // for (int k = 0; k < get_N<decltype(matA.reg)>::value; ++k) {
+      //     matA_acc.reg[k] = matA.reg[k];
+      // }
       // matA_acc.reg = matA.reg;
-
+      // matC.reg[0] = matA_acc_t::tile_size_x;
+      // matC.reg[1] = matA_acc_t::tile_size_y;
+      // matC.reg[2] = matA_acc_t::block_size_x;
+      // matC.reg[3] = matA_acc_t::block_size_y;
+      // for (int jj = 0; jj < matA_acc_t::tile_size_y; ++jj) {
+      //     for (int ii = 0; ii < matA_acc_t::tile_size_x; ++ii) {
+      //         matA_acc.reg[ii + jj * matA_acc_t::tile_size_x] = ii + jj * matA_acc_t::tile_size_x;
+      //     }
+      // }
+      // matB.reg = 0;
+      // matB.reg[7] = 0x00111111;
+      // if (i == 0 and debug) {
+      //     debug_dump(matB, out_buf);
+      // }
+      // for (int i = 2; i < 128; ++i) {
+      //     matB.reg.xetla_select<1, 1>(i) = 0x88888888;
+      // }
       dequantize(matB_acc, matB, scale, zero_pt, dequantize_args, debug);
       // if (debug) {
       //     auto matB_r=matB_acc.reg.xetla_format<uint32_t>();
@@ -779,11 +809,26 @@ class gemm_t<
       //         matC.reg[i] = matB_r.xetla_select<1, 1>(i);
       //     }
       // }
-      // if (debug) {
-      // if (i == 0)
+      // print A
+      // if ((i == 0) and debug) {
+      //     for (int k = 0; k < get_N<decltype(matA_acc.reg)>::value; ++k) {
+      //         matC.reg[k] = matA_acc.reg[k];
+      //     }
+      // }
+      // print B
+      // if ((i == 0) and debug) {
       //     for (int k = 0; k < get_N<decltype(matB_acc.reg)>::value; ++k) {
       //         matC.reg[k] = matB_acc.reg[k];
       //     }
+      // }
+      // for (int k = 0; k < get_N<decltype(matB_acc.reg)>::value; ++k) {
+      // matB_acc.reg = 0;
+      // matB_acc.reg[160 + 30] = 1;
+      // matB_acc.reg[161 + 30] = 1;
+      // matB_acc.reg[192 + 30] = 1;
+      // matB_acc.reg[193 + 30] = 1;
+      // matB_acc.reg[224 + 30] = 1;
+      // matB_acc.reg[225 + 30] = 1;
       // }
           // matC.reg[0] = get_N<decltype(matA_acc.reg)>::value; // .xetla_select<1, 1>(i);
           // matC.reg[1] = sizeof(typename get_N<decltype(matA_acc.reg)>::dtype); // .xetla_select<1, 1>(i);
@@ -793,11 +838,27 @@ class gemm_t<
       //       matAcc, matAcc, matC, matB_acc, matA_acc, i == compute_stages - 1);
       // } else {
       //   if constexpr (is_col_major_b) {
+      // vnni_convert(matB_acc);
       tile_transpose(matB_acc);
+      vnni_convert(matB_acc);
+      // vnni_transform(matB2_acc, matB_acc);
+      // if (i == 0 and debug) {
+      //     debug_dump(matB_acc, out_buf);
+      // }
+      // if (i == 0 and debug) {
+      //     debug_dump(matB_acc, out_buf);
+      // }
+      // tile_transpose(matB_acc);
       //   }
+      // if ((i == 0) and debug) {
+      //     for (int k = 0; k < get_N<decltype(matB_acc.reg)>::value; ++k) {
+      //         matC.reg[k] = matB_acc.reg[k];
+      //     }
+      // }
+      // if ((i == 0) and debug)
       tile_mma::mma(matC, matC, matB_acc, matA_acc);
       // }
-      periodic_sync_wait(i);
+      // periodic_sync_wait(i);
     }
   }
 

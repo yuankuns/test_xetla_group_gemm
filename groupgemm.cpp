@@ -21,6 +21,7 @@ template<typename T, class Policy>
 void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev, T *s_dev, T *y_dev,
             int *total_rows_for_each_expert,
             int *total_rows_for_each_expert_h,
+            uint16_t *out_buf,
             const int M, const int N, const int K,
             const int expert_num) {
     if (group_size == 128) {
@@ -30,6 +31,7 @@ void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev
             q, x_dev, w_dev, s_dev, y_dev,
             M, N, K, total_rows_for_each_expert,
             total_rows_for_each_expert_h,
+            out_buf,
             expert_num);
         DPCPP_Q_SUBMIT_CGFS(q, funcs);
     } else if (group_size == 256) {
@@ -39,6 +41,7 @@ void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev
             q, x_dev, w_dev, s_dev, y_dev,
             M, N, K, total_rows_for_each_expert,
             total_rows_for_each_expert_h,
+            out_buf,
             expert_num);
         DPCPP_Q_SUBMIT_CGFS(q, funcs);
     } else if (group_size == 64) {
@@ -48,6 +51,7 @@ void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev
             q, x_dev, w_dev, s_dev, y_dev,
             M, N, K, total_rows_for_each_expert,
             total_rows_for_each_expert_h,
+            out_buf,
             expert_num);
         DPCPP_Q_SUBMIT_CGFS(q, funcs);
     }
@@ -93,6 +97,7 @@ void test_group_gemm() {
     // T * w_dev = malloc_shared<T>(w_npy.num_vals, q); // 16bit for bf16/fp16
     T * y_dev = malloc_shared<T>(y_npy.num_vals, q);
     T * y_test = malloc_host<T>(y_npy.num_vals, q);
+    uint16_t *out_buf = malloc_shared<uint16_t>(y_npy.num_vals, q);
     T * s_dev = malloc_shared<T>(s_npy.num_vals, q); // int4
     int *total_rows_for_each_expert_h = malloc_host<int>(expert_num, q);
     int *total_rows_for_each_expert = malloc_shared<int>(expert_num, q);
@@ -109,6 +114,7 @@ void test_group_gemm() {
     launch_int4<T, Policy>(group_size, q, x_dev, w_dev, s_dev, y_dev,
                            total_rows_for_each_expert,
                            total_rows_for_each_expert_h,
+                           out_buf,
                            M, N, K, expert_num);
     // launch_16bit<T, Policy>(q, x_dev, w_dev, y_dev,
     //                         total_rows_for_each_expert,
@@ -118,9 +124,18 @@ void test_group_gemm() {
     q.copy(y_dev, y_test, y_npy.num_vals);
     q.copy(offset_rows_for_each_expert, offset_rows_for_each_expert_h, expert_num);
     q.wait();
+    printf("output:\n");
+    T *ptr= reinterpret_cast<T * >(out_buf);
+    for (int i = 0; i < 1024; ++i) {
+        if (i % 16 == 0)
+            printf("(%03d)", i);
+        printf("%7.4f, ", (float)ptr[i]);
+        if (i % 16 == 15)
+            printf("\n");
+    }
     printf("test:\n");
-    for (int m = 0; m < std::min(N, M); ++m) {
-        for (int n = 0; n < std::min(K, N); ++n) {
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
             if (n % 16 == 0)
                 printf("(%03d,%03d): ", m, n);
             printf("%7.4f, ", (float)y_test[m * N + n]);

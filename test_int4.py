@@ -103,7 +103,7 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     scales = scales.t().contiguous()
     out_torch = torch.matmul(input_torch, weight_fp)
     print('x', input_torch[0:4,0:32])
-    for j,row in enumerate(weight[0:64, 0:16].view(torch.uint32)):
+    for j,row in enumerate(weight[0:n,:].view(torch.uint32)):
         print(f"{j:02d}: ", end="")
         for val in row:
             print(f"{val:08x}", end=" ")
@@ -124,6 +124,7 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     dump_dict = {}
     dump_dict['x'] = input_torch.view(torch.uint16).detach().cpu().numpy()
     dump_dict['w'] = weight.detach().cpu().numpy()
+    dump_dict['wfp'] = weight_fp_t.view(torch.uint16).detach().cpu().numpy()
     dump_dict['y'] = out_torch.view(torch.uint16).detach().cpu().numpy()
     dump_dict['s'] = scales.view(torch.uint16).detach().cpu().numpy()
     dump_dict['shape'] = np.array([m, n, k, group_size])

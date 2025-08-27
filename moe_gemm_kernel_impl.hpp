@@ -303,6 +303,7 @@ struct MoEGEMMINT4 {
       const int gemm_n,
       const int gemm_k,
       const int* total_rows_for_each_expert,
+      uint16_t *out_buf,
       const int expert_num)
       : activation(activation),
         weights(weights),
@@ -311,6 +312,7 @@ struct MoEGEMMINT4 {
         gemm_n(gemm_n),
         gemm_k(gemm_k),
         total_rows_for_each_expert(total_rows_for_each_expert),
+        out_buf(out_buf),
         expert_num(expert_num) {}
 
   static inline sycl::nd_range<3> get_nd_range(
@@ -439,7 +441,7 @@ struct MoEGEMMINT4 {
     bool debug = group_m_id == 0 and group_n_id == 0 and skip_m == 0 and item.get_local_linear_id() == 0;
     // if (debug)
     //     sycl::ext::oneapi::experimental::printf("gemm_m %d gemm_k %d, gemm_n %d, coord m,n (%d, %d) sg %d\n", gemm_m, gemm_k, gemm_n, start_y, start_x, item.get_local_linear_id());
-    // gemm(g, matAcc, gemm_args, 0, 0, debug); //disable temp
+    gemm(g, matAcc, gemm_args, out_buf, 0, 0, debug);
 
     epilogue_t epilogue;
     epilogue(g, matAcc, mem_desc_c);
@@ -449,6 +451,7 @@ struct MoEGEMMINT4 {
   const uint32_t* weights;
   const T* scale;
   T* outputs;
+  uint16_t *out_buf;
   const int gemm_n;
   const int gemm_k;
   const int* total_rows_for_each_expert;
@@ -471,6 +474,7 @@ cgfs_t LaunchMoEGEMMINT4(
     const int gemm_k,
     const int* total_rows_for_each_expert,
     const int* total_rows_for_each_expert_h,
+    uint16_t *out_buf,
     const int expert_num) {
   using kernel = MoEGEMMINT4<T, Policy, GS, arch_tag>;
   printf("x %p w %p y %p s %p\n", activation, weights, outputs, scale);
@@ -484,6 +488,7 @@ cgfs_t LaunchMoEGEMMINT4(
         gemm_n,
         gemm_k,
         total_rows_for_each_expert,
+        out_buf,
         expert_num);
     cgh.parallel_for(
         kernel::get_nd_range(total_rows_for_each_expert_h, gemm_n, expert_num),
