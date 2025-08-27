@@ -87,7 +87,7 @@ void test_group_gemm() {
     int N = shape_npy.data<int64_t>()[1];
     int K = shape_npy.data<int64_t>()[2];
     for (int i=0; i < 16; ++i) {
-        printf("%f ", (float)x_npy.data<T>()[i]);
+        printf("%f ", (float)s_npy.data<T>()[i]);
     }
     printf("\n");
     int group_size = shape_npy.data<int64_t>()[3];
@@ -111,6 +111,10 @@ void test_group_gemm() {
     q.copy(s_npy.data<uint16_t>(), (uint16_t *)s_dev, s_npy.num_vals);//int4
     q.copy(total_rows_for_each_expert_h, total_rows_for_each_expert, expert_num);
     q.wait();
+    for (int i = 0; i < 16; ++i) {
+        printf("%f ", (float)s_dev[i]);
+    }
+    printf("\n");
     launch_int4<T, Policy>(group_size, q, x_dev, w_dev, s_dev, y_dev,
                            total_rows_for_each_expert,
                            total_rows_for_each_expert_h,
@@ -126,36 +130,36 @@ void test_group_gemm() {
     q.wait();
     printf("output:\n");
     T *ptr= reinterpret_cast<T * >(out_buf);
-    // for (int i = 0; i < 1024; ++i) {
-    //     if (i % 16 == 0)
-    //         printf("(%03d)", i);
-    //     printf("%7.4f, ", (float)ptr[i]);
-    //     if (i % 16 == 15)
-    //         printf("\n");
-    // }
-    // printf("test:\n");
-    // for (int m = 0; m < M; ++m) {
-    //     for (int n = 0; n < N; ++n) {
-    //         if (n % 16 == 0)
-    //             printf("(%03d,%03d): ", m, n);
-    //         printf("%7.4f, ", (float)y_test[m * N + n]);
-    //         if (n % 16 == 15)
-    //             printf("\n");
-    //     }
-    //     printf("\n");
-    // }
-    // printf("\nrefe:\n");
-    // for (int m = 0; m < std::min(64, M); ++m) {
-    //     for (int n = 0; n < std::min(128, N); ++n) {
-    //         if (n % 16 == 0)
-    //             printf("(%03d,%03d): ", m, n);
-    //         printf("%7.4f, ", (float)y_npy.data<T>()[m * N + n]);
-    //         if (n % 16 == 15)
-    //             printf("\n");
-    //     }
-    //     printf("\n");
-    // }
-    // printf("\n");
+    for (int i = 0; i < 1024; ++i) {
+        if (i % 16 == 0)
+            printf("(%03d)", i);
+        printf("%7.4f, ", (float)ptr[i]);
+        if (i % 16 == 15)
+            printf("\n");
+    }
+    printf("test:\n");
+    for (int m = 0; m < M; ++m) {
+        for (int n = 0; n < N; ++n) {
+            if (n % 16 == 0)
+                printf("(%03d,%03d): ", m, n);
+            printf("%7.4f, ", (float)y_test[m * N + n]);
+            if (n % 16 == 15)
+                printf("\n");
+        }
+        printf("\n");
+    }
+    printf("\nrefe:\n");
+    for (int m = 0; m < std::min(64, M); ++m) {
+        for (int n = 0; n < std::min(128, N); ++n) {
+            if (n % 16 == 0)
+                printf("(%03d,%03d): ", m, n);
+            printf("%7.4f, ", (float)y_npy.data<T>()[m * N + n]);
+            if (n % 16 == 15)
+                printf("\n");
+        }
+        printf("\n");
+    }
+    printf("\n");
     verify(y_test, y_npy.data<T>(), M, N, 1e-4, 1e-4);
     // T * bf16_ptr=reinterpret_cast<T *>(offset_rows_for_each_expert_h);
     // for (int i = 0; i < expert_num; ++i) {

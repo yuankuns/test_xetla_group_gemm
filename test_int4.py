@@ -75,8 +75,8 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
         group_size = k
     group_num = k // group_size
 
-    # scales = torch.randn([group_num, n], dtype=dtype)
-    scales = torch.ones([group_num, n], dtype=dtype)
+    scales = torch.randn([group_num, n], dtype=dtype)
+    # scales = torch.ones([group_num, n], dtype=dtype)
     if qmode == QuantMode.SYM:
         zero_points = None
     # elif qmode == QuantMode.ASYM:
@@ -101,7 +101,7 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     weight_fp_t = weight_fp.t().contiguous()
     weight = weight.t().contiguous()
     print(weight.shape, weight_fp_t.shape)
-    scales = scales.t().contiguous()
+    # scales = scales.t().contiguous()
     out_torch = torch.matmul(input_torch, weight_fp)
     print('x', input_torch[0:4,0:32])
     for j,row in enumerate(weight[0:n,:].view(torch.uint32)):
@@ -109,7 +109,7 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
         for val in row:
             print(f"{val:08x}", end=" ")
         print("")
-    print('s', scales[0:8, 0:4])
+    print('s', scales)
     print('w_fp_t', weight_fp_t[0:32, 0:32])
     print("o", out_torch[0:8, 0:16])
     # check gemm
