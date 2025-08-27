@@ -173,16 +173,17 @@ struct dequant_int4_weight_t {
         // correct unroll here trigger numerical issues
         for (uint32_t jj = 0; jj < block_size_x_b; ++jj) {
             for (uint32_t ii = 0; ii < block_size_y_b; ii += step) {
-                // uint32_t offset_y_in_tile = i * block_size_y_b + ii; // K
-                // uint32_t offset_x_in_tile = j * block_size_x_b + jj; // N
-                // // uint32_t scale_idx = 
-                // //     offset_y_in_tile * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
+                uint32_t offset_y_in_tile = i * block_size_y_b + ii; // K
+                uint32_t offset_x_in_tile = j * block_size_x_b + jj; // N
+                uint32_t scale_idx =
+                    offset_y_in_tile * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
                 // uint32_t x = j * block_size_x_b;
                 // uint32_t scale_idx = x; // + args.wg_start_k;
                     // (args.wg_start_n + offset_y_in_tile) * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
                 cvt_blk_i16.xetla_select<step, 1>(jj * block_size_y_b + ii) =
                   cvt_blk_i16.xetla_select<step, 1>(jj * block_size_y_b + ii) - zpt_i16;
-                dst_blk.xetla_select<step, 1>(jj * block_size_y_b + ii) = cvt_blk_i16.xetla_select<step, 1>(jj * block_size_y_b + ii); // * scale.reg[scale_idx];
+                dst_blk.xetla_select<step, 1>(jj * block_size_y_b + ii) = cvt_blk_i16.xetla_select<step, 1>(jj * block_size_y_b + ii) * scale.reg[scale_idx];
+                // dst_blk.xetla_select<step, 1>(jj * block_size_y_b + ii) = float(sycl::ext::oneapi::bfloat16(scale.reg[scale_idx]));
                 // dst_blk.xetla_select<steps, 1>(jj * block_size_y_b + ii) = scale_idx;
             }
         }

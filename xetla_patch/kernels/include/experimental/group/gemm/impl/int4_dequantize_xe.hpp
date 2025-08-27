@@ -36,7 +36,7 @@ namespace gpu::xetla::group {
 /// @{
 template<typename T>
 void debug_dump(T &mat, uint16_t *out) {
-    constexpr size_t step = 32;
+    constexpr size_t step = 16;
     auto reg_16 = mat.reg.xetla_format<uint16_t>();
     for (size_t i = 0; i < get_N<decltype(mat.reg)>::value; i += step) {
         xetla_store_global<uint16_t, step,
@@ -258,7 +258,8 @@ class gemm_t<
   // num_block_y set to 1
   static constexpr uint32_t block_size_y_scale =
       (k_stride + dequant_s - 1) / dequant_s;
-  static constexpr uint32_t tile_size_y_scale = block_size_y_scale;
+  static constexpr uint32_t tile_size_y_scale =
+      (tile_size_y_c + dequant_s - 1) / dequant_s;
   static constexpr uint32_t block_size_y_zero_pt =
       (k_stride + dequant_s - 1) / dequant_s;
   static constexpr uint32_t tile_size_y_zero_pt = block_size_y_zero_pt;
@@ -269,17 +270,15 @@ class gemm_t<
   static constexpr uint32_t zero_pt_addr_update_freq =
       (k_stride < dequant_s) ? dequant_s / k_stride : 1;
 
-  using mem_desc_scale_t = mem_desc_t<
+  using mem_desc_scale_t = mem_desc_t< // scale must be row major
       dtype_scale,
-      mem_layout_b,
-      mem_space::global,
-      mem_desc_b_t::alignment>;
+      mem_layout::row_major,
+      mem_space::global>;
 
   using mem_desc_zero_pt_t = mem_desc_t<
       dtype_zero_pt,
       mem_layout::row_major,
-      mem_space::global,
-      mem_desc_b_t::alignment>;
+      mem_space::global>;
 
   using matC_tile_desc_t = subgroup::tile_desc_t<
       tile_size_x_c,
@@ -398,7 +397,7 @@ class gemm_t<
     /// @brief Is the memory description of zero_pt buffer. Zero_pt size:
     /// (matrix_k/dequant_s)x(matrix_n/pack_ratio)
     mem_desc_zero_pt_t zero_pt_base_desc;
-
+    const dtype_a *scale_ptr;
     /// @brief Default construct.
     inline arguments_t() = default;
 
@@ -408,12 +407,14 @@ class gemm_t<
         uint32_t loop_start,
         uint32_t loop_count,
         mem_desc_scale_t scale_desc,
+        const dtype_a * scale,
         mem_desc_zero_pt_t zero_pt_desc)
         : matA_base_desc(matA_desc),
           matB_base_desc(matB_desc),
           inner_loop_start(loop_start),
           inner_loop_count(loop_count),
           scale_base_desc(scale_desc),
+          scale_ptr(scale),
           zero_pt_base_desc(zero_pt_desc) {}
 
     inline arguments_t(
@@ -421,12 +422,14 @@ class gemm_t<
         mem_desc_b_t matB_desc,
         uint32_t loop_start,
         uint32_t loop_count,
-        mem_desc_scale_t scale_desc)
+        mem_desc_scale_t scale_desc,
+        const dtype_a * scale)
         : matA_base_desc(matA_desc),
           matB_base_desc(matB_desc),
           inner_loop_start(loop_start),
           inner_loop_count(loop_count),
-          scale_base_desc(scale_desc) {}
+          scale_base_desc(scale_desc),
+          scale_ptr(scale) {}
     // Be aware of the risks: Rule of three (copy constructor, copy
     // assignment, destructor) Please check if you need to add self-define
     // destructor inline ~arguments_t(){}
@@ -436,6 +439,7 @@ class gemm_t<
           inner_loop_start(args.inner_loop_start),
           inner_loop_count(args.inner_loop_count),
           scale_base_desc(args.scale_base_desc),
+          scale_ptr(args.scale_ptr),
           zero_pt_base_desc(args.zero_pt_base_desc) {}
     inline arguments_t& operator=(const arguments_t& args) {
       this->matA_base_desc = args.matA_base_desc;
@@ -443,6 +447,7 @@ class gemm_t<
       this->inner_loop_start = args.inner_loop_start;
       this->inner_loop_count = args.inner_loop_count;
       this->scale_base_desc = args.scale_base_desc;
+      this->scale_ptr = args.scale_ptr;
       this->zero_pt_base_desc = args.zero_pt_base_desc;
       return *this;
     }
@@ -595,7 +600,7 @@ class gemm_t<
 
     // scale m always 0
     scale_wg_start_n = args.scale_base_desc.coord.y; // args.matB_base_desc.coord.y;//wg_start_n
-    scale_wg_start_k = args.matB_base_desc.coord.x; // args.matB_base_desc.coord.x; //wg_start_k
+    scale_wg_start_k = args.scale_base_desc.coord.x; // args.matB_base_desc.coord.x; //wg_start_k
     typename dequantize_t::arguments_t dequantize_args{scale_wg_start_n, scale_wg_start_k};
     dequantize_t dequantize;
 
@@ -751,8 +756,8 @@ class gemm_t<
           matB, matB_payload);
       // subgroup::tile_load<cache_hint::uncached, cache_hint::uncached>(
       //     matB, matB_payload); 
-      // subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
-      //     scale, scale_payload); // hang
+      subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
+          scale, scale_payload);
       // if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
       //   subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
       //       zero_pt, zero_pt_payload); // hang
@@ -760,18 +765,17 @@ class gemm_t<
       tile_k_idx++;
       matA_payload.template update_tdesc<update_dir_a>(matA_t::tile_size_x);
       matB_payload.template update_tdesc<update_dir_b>(matB_t::tile_size_y);
-      // if (tile_k_idx % scale_addr_update_freq == 0) {
-      //   scale_payload.template update_tdesc<update_dir_b>(scale_t::tile_size_y);
-      // }
-      if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
-        if (tile_k_idx % zero_pt_addr_update_freq == 0) {
-          zero_pt_payload.template update_tdesc<tdesc_update_dir::y_dir>(
-              zero_pt_t::tile_size_y);
-        }
+      if (tile_k_idx % scale_addr_update_freq == 0) {
+        scale_payload.template update_tdesc<update_dir_b>(scale_t::tile_size_y);
       }
+      // if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
+      //   if (tile_k_idx % zero_pt_addr_update_freq == 0) {
+      //     zero_pt_payload.template update_tdesc<tdesc_update_dir::y_dir>(
+      //         zero_pt_t::tile_size_y);
+      //   }
+      // }
       matA_acc_t matA_acc;
       matB_acc_t matB_acc;
-      matB_acc_t matB2_acc;
       // if constexpr (is_vnni_tiled_a) {
       //   subgroup::vnni_reverse(matA);
       // }
@@ -802,7 +806,38 @@ class gemm_t<
       // for (int i = 2; i < 128; ++i) {
       //     matB.reg.xetla_select<1, 1>(i) = 0x88888888;
       // }
+      if (i == 0 and debug) {
+          // for (int k = 0; k < 8; ++k)
+          // //     // sycl::ext::oneapi::experimental::printf("scale %f\n",
+          // //     //                                         (float)args.scale_ptr[0]);
+
+          //     scale.reg[k] = (float)args.scale_ptr[k];
+          // scale.reg = -99.0;
+          // scale.reg[0] = tile_size_x_b;
+          // scale.reg[1] = tile_size_y_scale;
+          // scale.reg[2] = block_size_x_b;
+          // scale.reg[3] = block_size_y_scale;
+          // scale.reg[4] = get_N<decltype(scale.reg)>::value;
+          // scale.reg[5] = sizeof(typename get_N<decltype(scale.reg)>::dtype);
+          // scale.reg[6] = block_size_y_b;
+          // scale.reg[7] = tile_size_y_b;
+          // scale.reg[8] = args.scale_base_desc.coord.y;
+          // scale.reg[9] = args.scale_base_desc.coord.x;
+          // scale.reg[9] = sycl::ext::oneapi::bfloat16(args.scale_ptr[0]);
+          // scale.reg[10] = sycl::ext::oneapi::bfloat16((float)args.scale_ptr[1]);
+          // scale.reg[11] = sycl::ext::oneapi::bfloat16((float)args.scale_ptr[2]);
+          // scale.reg[12] = sycl::ext::oneapi::bfloat16((float)args.scale_ptr[3]);
+          // scale.reg[13] = sycl::ext::oneapi::bfloat16((float)args.scale_ptr[4]);
+          // scale.reg[14] = sycl::ext::oneapi::bfloat16((float)args.scale_ptr[5]);
+          // scale.reg[15] = sycl::ext::oneapi::bfloat16((float)args.scale_ptr[6]);
+          // xetla_vector<uint16_t, 32> t = xetla_load_global<uint16_t, 32>((uint16_t *)args.scale_ptr, 0);
+          // xetla_store_global<uint16_t, 32>((uint16_t *)out_buf, 0, t);
+          // debug_dump(scale, out_buf);
+      }
       dequantize(matB_acc, matB, scale, zero_pt, dequantize_args, debug);
+      if (i == 0 and debug) {
+          debug_dump(matB_acc, out_buf);
+      }
       // if (debug) {
       //     auto matB_r=matB_acc.reg.xetla_format<uint32_t>();
       //     for (int i = 0; i < 64; ++i) {
@@ -845,9 +880,6 @@ class gemm_t<
       // if (i == 0 and debug) {
       //     debug_dump(matB_acc, out_buf);
       // }
-      // if (i == 0 and debug) {
-      //     debug_dump(matB_acc, out_buf);
-      // }
       // tile_transpose(matB_acc);
       //   }
       // if ((i == 0) and debug) {
@@ -856,7 +888,7 @@ class gemm_t<
       //     }
       // }
       // if ((i == 0) and debug)
-      tile_mma::mma(matC, matC, matB_acc, matA_acc);
+          tile_mma::mma(matC, matC, matB_acc, matA_acc);
       // }
       // periodic_sync_wait(i);
     }
