@@ -175,6 +175,8 @@ struct dequant_int4_weight_t {
             for (uint32_t ii = 0; ii < block_size_y_b; ii += step) {
                 uint32_t offset_y_in_tile = i * block_size_y_b + ii; // K
                 uint32_t offset_x_in_tile = j * block_size_x_b + jj; // N
+                // uint32_t scale_idx =
+                // offset_y_in_tile * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
                 uint32_t scale_idx =
                     offset_y_in_tile * scale_t::block_size_x + offset_x_in_tile; // / dequant_s; // ?
                 // uint32_t x = j * block_size_x_b;

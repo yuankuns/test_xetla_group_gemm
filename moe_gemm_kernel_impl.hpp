@@ -424,7 +424,7 @@ struct MoEGEMMINT4 {
         (T*)current_scale,
         {static_cast<uint32_t>(gemm_n),
          static_cast<uint32_t>(gemm_k) / group_size,
-         static_cast<uint32_t>(gemm_k) / group_size},
+         static_cast<uint32_t>(gemm_n)},
         {start_x, 0});
 
     gemm_t gemm;
@@ -484,8 +484,8 @@ cgfs_t LaunchMoEGEMMINT4(
     uint16_t *out_buf,
     const int expert_num) {
   using kernel = MoEGEMMINT4<T, Policy, GS, arch_tag>;
-  printf("x %p w %p y %p s %p\n", activation, weights, outputs, scale);
-  printf("total_rows %d\n", total_rows_for_each_expert_h[0]);
+  // printf("x %p w %p y %p s %p\n", activation, weights, outputs, scale);
+  // printf("total_rows %d\n", total_rows_for_each_expert_h[0]);
   auto cgf = [=](sycl::handler& cgh) {
     kernel task(
         activation,

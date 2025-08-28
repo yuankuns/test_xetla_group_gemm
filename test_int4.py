@@ -1,8 +1,22 @@
 import torch
 import numpy as np
 from enum import Enum
+import argparse
+
 base_atol = 1e-2
 base_rtol = 2e-2
+def get_options():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--M", default=8192, type=int)
+    parser.add_argument("--N", default=8192, type=int)
+    parser.add_argument("--K", default=4096, type=int)
+    return parser.parse_args()
+
+def get_configs(options):
+    M = options.M
+    N = options.N
+    K = options.K
+    return M, N, K
 
 class QuantMode(Enum):
     SYM = 1
@@ -100,18 +114,18 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     ).cpu()
     weight_fp_t = weight_fp.t().contiguous()
     weight = weight.t().contiguous()
-    print(weight.shape, weight_fp_t.shape)
+    # print(weight.shape, weight_fp_t.shape)
     # scales = scales.t().contiguous()
     out_torch = torch.matmul(input_torch, weight_fp)
-    print('x', input_torch[0:4,0:32])
-    for j,row in enumerate(weight[0:n,:].view(torch.uint32)):
-        print(f"{j:02d}: ", end="")
-        for val in row:
-            print(f"{val:08x}", end=" ")
-        print("")
-    print('s', scales)
-    print('w_fp_t', weight_fp_t[0:32, 0:32])
-    print("o", out_torch[0:8, 0:16])
+    # print('x', input_torch[0:4,0:32])
+    # for j,row in enumerate(weight[0:n,:].view(torch.uint32)):
+    #     print(f"{j:02d}: ", end="")
+    #     for val in row:
+    #         print(f"{val:08x}", end=" ")
+    #     print("")
+    # print('s', scales)
+    # print('w_fp_t', weight_fp_t[0:32, 0:32])
+    # print("o", out_torch[0:8, 0:16])
     # check gemm
     # with torch.xpu.compute_eng(torch.xpu.XPUComputeEng.XETLA):
     #     out_xetla = torch.ops.torch_ipex.mm_int4(
@@ -131,6 +145,12 @@ def test_gemm_int4(seed, m, n, k, per_channel, act_order, qmode, dtype):
     dump_dict['shape'] = np.array([m, n, k, group_size])
     np.savez("int4.npz", **dump_dict)
 
+def main():
+    options = get_options()
+    M, N, K = get_configs(options)
+    test_gemm_int4(123, M, N, K, False, False, QuantMode.SYM, torch.bfloat16)
+
 if __name__ == '__main__':
     #test_gemm_int4(123, 128, 512, 256, False, False, QuantMode.SYM, torch.bfloat16)
-    test_gemm_int4(123, 32, 128, 64, False, False, QuantMode.SYM, torch.bfloat16)
+    # test_gemm_int4(123, 128, 512, 128, False, False, QuantMode.SYM, torch.bfloat16)
+    main()

@@ -595,8 +595,6 @@ class gemm_t<
     scale_prefetch_payload_t scale_prefetch_payload(args.scale_base_desc, 0);
     zero_pt_prefetch_payload_t zero_pt_prefetch_payload(
         args.zero_pt_base_desc, 0);
-    if (debug)
-        sycl::ext::oneapi::experimental::printf("sg_idx %d sg_idy %d A x,y (%d, %d)\n", sg_idx, sg_idy, args.matA_base_desc.coord.x, args.matA_base_desc.coord.y);
 
     // scale m always 0
     scale_wg_start_n = args.scale_base_desc.coord.y; // args.matB_base_desc.coord.y;//wg_start_n
@@ -755,7 +753,7 @@ class gemm_t<
       subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
           matB, matB_payload);
       // subgroup::tile_load<cache_hint::uncached, cache_hint::uncached>(
-      //     matB, matB_payload); 
+      //     matB, matB_payload);
       subgroup::tile_load<cache_hint::cached, cache_hint::cached>(
           scale, scale_payload);
       // if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
@@ -766,7 +764,7 @@ class gemm_t<
       matA_payload.template update_tdesc<update_dir_a>(matA_t::tile_size_x);
       matB_payload.template update_tdesc<update_dir_b>(matB_t::tile_size_y);
       if (tile_k_idx % scale_addr_update_freq == 0) {
-        scale_payload.template update_tdesc<update_dir_b>(scale_t::tile_size_y);
+        scale_payload.template update_tdesc<tdesc_update_dir::y_dir>(scale_t::tile_size_y);
       }
       // if constexpr (compute_policy::quant_mode != quant_mode::I4_SYM) {
       //   if (tile_k_idx % zero_pt_addr_update_freq == 0) {
@@ -806,15 +804,16 @@ class gemm_t<
       // for (int i = 2; i < 128; ++i) {
       //     matB.reg.xetla_select<1, 1>(i) = 0x88888888;
       // }
-      if (i == 0 and debug) {
+      // if (i == 4 and debug) {
+      //     sycl::ext::oneapi::experimental::printf("dump scale %d\n", i);
           // for (int k = 0; k < 8; ++k)
           // //     // sycl::ext::oneapi::experimental::printf("scale %f\n",
           // //     //                                         (float)args.scale_ptr[0]);
 
           //     scale.reg[k] = (float)args.scale_ptr[k];
           // scale.reg = -99.0;
-          // scale.reg[0] = tile_size_x_b;
-          // scale.reg[1] = tile_size_y_scale;
+          // scale.reg[0] = scale_t::tile_size_x;
+          // scale.reg[1] = scale_t::tile_size_y;
           // scale.reg[2] = block_size_x_b;
           // scale.reg[3] = block_size_y_scale;
           // scale.reg[4] = get_N<decltype(scale.reg)>::value;
@@ -832,12 +831,14 @@ class gemm_t<
           // scale.reg[15] = sycl::ext::oneapi::bfloat16((float)args.scale_ptr[6]);
           // xetla_vector<uint16_t, 32> t = xetla_load_global<uint16_t, 32>((uint16_t *)args.scale_ptr, 0);
           // xetla_store_global<uint16_t, 32>((uint16_t *)out_buf, 0, t);
-          // debug_dump(scale, out_buf);
-      }
+      //     debug_dump(scale, out_buf);
+      // }
       dequantize(matB_acc, matB, scale, zero_pt, dequantize_args, debug);
-      if (i == 0 and debug) {
-          debug_dump(matB_acc, out_buf);
-      }
+      // if (i == 4 and debug) {
+      //     matB_acc.reg[0] = tile_k_idx;
+      //     matB_acc.reg[1] = scale_addr_update_freq;
+      //     debug_dump(matB_acc, out_buf);
+      // }
       // if (debug) {
       //     auto matB_r=matB_acc.reg.xetla_format<uint32_t>();
       //     for (int i = 0; i < 64; ++i) {
