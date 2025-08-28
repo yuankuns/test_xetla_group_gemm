@@ -10,12 +10,12 @@
 #include "moe_gemm_policy.hpp"
 #include "launch_kernels.hpp"
 
-void init_rows_for_expert(int *total_rows_for_each_expert_h, int M, int expert_num) {
-    total_rows_for_each_expert_h[0] = M;
-    for (int i = 1; i < expert_num; ++i) {
-        total_rows_for_each_expert_h[i] = 0;
-    }
-}
+// void init_rows_for_expert(int *total_rows_for_each_expert_h, int M, int expert_num) {
+//     total_rows_for_each_expert_h[0] = M;
+//     for (int i = 1; i < expert_num; ++i) {
+//         total_rows_for_each_expert_h[i] = 0;
+//     }
+// }
 
 template<typename T, class Policy>
 void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev, T *s_dev, T *y_dev,
@@ -26,7 +26,7 @@ void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev
             const int expert_num) {
     if (group_size == 128) {
         constexpr int GS = 128;
-        printf("Launch groupsize=%d\n", GS);
+        // printf("Launch groupsize=%d\n", GS);
         auto funcs = LaunchMoEGEMMINT4<T, Policy, GS>(
             q, x_dev, w_dev, s_dev, y_dev,
             M, N, K, total_rows_for_each_expert,
@@ -36,7 +36,7 @@ void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev
         DPCPP_Q_SUBMIT_CGFS(q, funcs);
     } else if (group_size == 256) {
         constexpr int GS = 256;
-        printf("Launch groupsize=%d\n", GS);
+        // printf("Launch groupsize=%d\n", GS);
         auto funcs = LaunchMoEGEMMINT4<T, Policy, GS>(
             q, x_dev, w_dev, s_dev, y_dev,
             M, N, K, total_rows_for_each_expert,
@@ -46,7 +46,7 @@ void launch_int4(int group_size, queue &q, const T *x_dev, const uint32_t *w_dev
         DPCPP_Q_SUBMIT_CGFS(q, funcs);
     } else if (group_size == 64) {
         constexpr int GS = 64;
-        printf("Launch groupsize=%d\n", GS);
+        // printf("Launch groupsize=%d\n", GS);
         auto funcs = LaunchMoEGEMMINT4<T, Policy, GS>(
             q, x_dev, w_dev, s_dev, y_dev,
             M, N, K, total_rows_for_each_expert,
@@ -75,7 +75,6 @@ void test_group_gemm() {
     using T = sycl::ext::oneapi::bfloat16;
     using Policy = MoEGEMMPolicy;
     queue q;
-    const int expert_num = 32;
     std::string data_file = "int4.npz"; // int4
     // std::string data_file = "bf16.npz";//bf16
     cnpy::NpyArray x_npy = cnpy::npz_load(data_file, "x");
@@ -83,10 +82,12 @@ void test_group_gemm() {
     cnpy::NpyArray y_npy = cnpy::npz_load(data_file, "y");
     cnpy::NpyArray s_npy = cnpy::npz_load(data_file, "s"); // int4
     cnpy::NpyArray shape_npy = cnpy::npz_load(data_file, "shape");
+    cnpy::NpyArray r_npy = cnpy::npz_load(data_file, "rows_for_experts");
     int M = shape_npy.data<int64_t>()[0];
     int N = shape_npy.data<int64_t>()[1];
     int K = shape_npy.data<int64_t>()[2];
     int group_size = shape_npy.data<int64_t>()[3];
+    int num_experts = shape_npy.data<int64_t>()[4];
 
     T * x_dev = malloc_shared<T>(x_npy.num_vals, q);
     uint32_t * w_dev = malloc_shared<uint32_t>(w_npy.num_vals, q); // int32 for int4
@@ -95,30 +96,36 @@ void test_group_gemm() {
     T * y_test = malloc_host<T>(y_npy.num_vals, q);
     uint16_t *out_buf = malloc_shared<uint16_t>(y_npy.num_vals, q);
     T * s_dev = malloc_shared<T>(s_npy.num_vals, q); // int4
-    int *total_rows_for_each_expert_h = malloc_host<int>(expert_num, q);
-    int *total_rows_for_each_expert = malloc_shared<int>(expert_num, q);
-    int *offset_rows_for_each_expert = malloc_shared<int>(expert_num, q);
-    int *offset_rows_for_each_expert_h = malloc_host<int>(expert_num, q);
+    int *total_rows_for_each_expert_h = malloc_host<int>(num_experts, q);
+    int *total_rows_for_each_expert = malloc_shared<int>(num_experts, q);
+    // int *offset_rows_for_each_expert = malloc_shared<int>(num_experts, q);
+    // int *offset_rows_for_each_expert_h = malloc_host<int>(num_experts, q);
 
-    init_rows_for_expert(total_rows_for_each_expert_h, M, expert_num);
+    // init_rows_for_expert(total_rows_for_each_expert_h, M, num_experts);
     q.copy(x_npy.data<uint16_t>(), (uint16_t *)x_dev, x_npy.num_vals);
     q.copy(w_npy.data<uint32_t>(), (uint32_t *)w_dev, w_npy.num_vals); // int4
     // q.copy(w_npy.data<uint16_t>(), (uint16_t *)w_dev, w_npy.num_vals); // int16
     q.copy(s_npy.data<uint16_t>(), (uint16_t *)s_dev, s_npy.num_vals);//int4
-    q.copy(total_rows_for_each_expert_h, total_rows_for_each_expert, expert_num);
+    q.copy(r_npy.data<int32_t>(), (int32_t *)total_rows_for_each_expert, r_npy.num_vals);
+    q.copy(r_npy.data<int32_t>(), (int32_t *)total_rows_for_each_expert_h, r_npy.num_vals);
     q.wait();
+    auto start = std::chrono::high_resolution_clock::now();
+    for (int i = 0; i <  100; ++i) {
     launch_int4<T, Policy>(group_size, q, x_dev, w_dev, s_dev, y_dev,
                            total_rows_for_each_expert,
                            total_rows_for_each_expert_h,
                            out_buf,
-                           M, N, K, expert_num);
+                           M, N, K, num_experts);
+    }
     // launch_16bit<T, Policy>(q, x_dev, w_dev, y_dev,
     //                         total_rows_for_each_expert,
     //                         total_rows_for_each_expert_h,
-    //                         M, N, K, expert_num);
+    //                         M, N, K, num_experts);
     q.wait();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto dur = end - start;
+    std::cout << "spent " << std::chrono::duration_cast<std::chrono::microseconds>(dur).count()/100 << " us" << std::endl;
     q.copy(y_dev, y_test, y_npy.num_vals);
-    q.copy(offset_rows_for_each_expert, offset_rows_for_each_expert_h, expert_num);
     q.wait();
     // printf("output:\n");
     // T *ptr= reinterpret_cast<T * >(out_buf);
@@ -154,7 +161,7 @@ void test_group_gemm() {
     // printf("\n");
     verify(y_test, y_npy.data<T>(), M, N, 1e-4, 1e-4);
     // T * bf16_ptr=reinterpret_cast<T *>(offset_rows_for_each_expert_h);
-    // for (int i = 0; i < expert_num; ++i) {
+    // for (int i = 0; i < num_experts; ++i) {
     //     printf("%f ", (float)(bf16_ptr[i]));
     // }
     // printf("\n");

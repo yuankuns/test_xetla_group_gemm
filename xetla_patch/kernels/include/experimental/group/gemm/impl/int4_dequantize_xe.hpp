@@ -34,6 +34,7 @@ namespace gpu::xetla::group {
 // };
 /// @addtogroup xetla_gemm
 /// @{
+/*
 template<typename T>
 void debug_dump(T &mat, uint16_t *out) {
     constexpr size_t step = 16;
@@ -44,6 +45,7 @@ void debug_dump(T &mat, uint16_t *out) {
                                out, i *sizeof(uint16_t), reg_16.xetla_select<step, 1>(i));
     }
 }
+*/
 /// @brief Is the gemm functor for Xe architecture and matrix engine.
 template <
     typename compute_attr_,

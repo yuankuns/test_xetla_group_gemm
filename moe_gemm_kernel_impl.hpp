@@ -440,14 +440,6 @@ struct MoEGEMMINT4 {
     matAcc_t matAcc(0);
     work_group_t g(item.get_local_linear_id());
     bool debug = group_m_id == 0 and group_n_id == 0 and skip_m == 0 and item.get_local_linear_id() == 0 and expert_m_id == 0;
-    if (debug) {
-        sycl::ext::oneapi::experimental::printf("debug scale %f %f %f %f\n",
-                                                (float)current_scale[0],
-                                                (float)current_scale[1],
-                                                (float)current_scale[2],
-                                                (float)current_scale[3]);
-            // sycl::ext::oneapi::experimental::printf("gemm_m %d gemm_k %d, gemm_n %d, coord m,n (%d, %d) sg %d\n", gemm_m, gemm_k, gemm_n, start_y, start_x, item.get_local_linear_id());
-    }
     gemm(g, matAcc, gemm_args, out_buf, 0, 0, debug);
 
     epilogue_t epilogue;
